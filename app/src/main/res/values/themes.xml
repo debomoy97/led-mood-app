@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.LedMood" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#7C4DFF</item>
+        <item name="colorPrimaryDark">#5E35B1</item>
+        <item name="colorAccent">#FF4081</item>
+    </style>
+</resources>
