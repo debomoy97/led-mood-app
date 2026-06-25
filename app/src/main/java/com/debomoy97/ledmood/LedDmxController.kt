@@ -5,10 +5,13 @@ import android.bluetooth.*
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
+
+private const val TAG = "LedDmxController"
 
 /**
  * Direct BLE driver for "LEDDMX-00" / "LEDDMX-03" strip controllers.
@@ -34,9 +37,12 @@ class LedDmxController(private val context: Context) {
     @SuppressLint("MissingPermission")
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            Log.d(TAG, "onConnectionStateChange: status=$status newState=$newState")
             if (newState == BluetoothGatt.STATE_CONNECTED) {
+                Log.d(TAG, "Connected at GATT level, discovering services...")
                 g.discoverServices()
             } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                Log.w(TAG, "Disconnected (status=$status)")
                 connectedDeferred?.complete(false)
                 servicesDiscoveredDeferred?.complete(false)
                 pendingWriteDeferred?.complete(false)
@@ -45,10 +51,24 @@ class LedDmxController(private val context: Context) {
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
+                val allServiceUuids = g.services.map { it.uuid.toString() }
+                Log.d(TAG, "Services discovered: $allServiceUuids")
                 val service = g.getService(SERVICE_UUID)
+                if (service == null) {
+                    Log.e(TAG, "Service $SERVICE_UUID NOT FOUND among discovered services")
+                } else {
+                    val allCharUuids = service.characteristics.map { it.uuid.toString() }
+                    Log.d(TAG, "Characteristics on matched service: $allCharUuids")
+                }
                 writeCharacteristic = service?.getCharacteristic(CHARACTERISTIC_UUID)
+                if (writeCharacteristic == null) {
+                    Log.e(TAG, "Characteristic $CHARACTERISTIC_UUID NOT FOUND")
+                } else {
+                    Log.d(TAG, "Write characteristic resolved successfully")
+                }
                 servicesDiscoveredDeferred?.complete(writeCharacteristic != null)
             } else {
+                Log.e(TAG, "onServicesDiscovered failed with status=$status")
                 servicesDiscoveredDeferred?.complete(false)
             }
         }
@@ -58,6 +78,7 @@ class LedDmxController(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             status: Int,
         ) {
+            Log.d(TAG, "onCharacteristicWrite: status=$status")
             pendingWriteDeferred?.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
     }
@@ -76,19 +97,34 @@ class LedDmxController(private val context: Context) {
         connectTimeoutMs: Long = 8000,
     ): Boolean {
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val adapter = bluetoothManager.adapter ?: return false
-        val scanner = adapter.bluetoothLeScanner ?: return false
+        val adapter = bluetoothManager.adapter
+        if (adapter == null) {
+            Log.e(TAG, "No Bluetooth adapter on this device")
+            return false
+        }
+        if (!adapter.isEnabled) {
+            Log.e(TAG, "Bluetooth adapter is not enabled")
+            return false
+        }
+        val scanner = adapter.bluetoothLeScanner
+        if (scanner == null) {
+            Log.e(TAG, "bluetoothLeScanner is null (Bluetooth may be off or unsupported)")
+            return false
+        }
 
         repeat(retries) { attempt ->
+            Log.d(TAG, "Connect attempt ${attempt + 1}/$retries: scanning for '$nameFragment'...")
             val device = withTimeoutOrNull(scanTimeoutMs) {
                 scanForDevice(scanner, nameFragment)
             }
 
             if (device == null) {
+                Log.w(TAG, "Attempt ${attempt + 1}/$retries: device not found within ${scanTimeoutMs}ms")
                 delay(1000)
                 return@repeat
             }
 
+            Log.d(TAG, "Attempt ${attempt + 1}/$retries: found device ${device.name} (${device.address}), connecting...")
             connectedDeferred = CompletableDeferred()
             servicesDiscoveredDeferred = CompletableDeferred()
             gatt = device.connectGatt(context, false, gattCallback)
@@ -98,12 +134,15 @@ class LedDmxController(private val context: Context) {
             } ?: false
 
             if (discovered) {
+                Log.d(TAG, "Attempt ${attempt + 1}/$retries: connected and ready.")
                 return true
             } else {
+                Log.w(TAG, "Attempt ${attempt + 1}/$retries: connect/discovery failed or timed out, retrying...")
                 disconnect()
                 delay(1000)
             }
         }
+        Log.e(TAG, "All $retries connect attempts failed for '$nameFragment'")
         return false
     }
 
@@ -115,15 +154,30 @@ class LedDmxController(private val context: Context) {
         val deferred = CompletableDeferred<BluetoothDevice?>()
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val name = result.device.name ?: return
-                if (name.contains(nameFragment, ignoreCase = true)) {
-                    if (!deferred.isCompleted) deferred.complete(result.device)
+                try {
+                    val name = result.device.name
+                    if (name != null) {
+                        Log.v(TAG, "Scan saw device: $name (${result.device.address})")
+                    }
+                    if (name != null && name.contains(nameFragment, ignoreCase = true)) {
+                        if (!deferred.isCompleted) deferred.complete(result.device)
+                    }
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Missing permission while reading scan result", e)
                 }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                Log.e(TAG, "BLE scan failed with errorCode=$errorCode")
+                if (!deferred.isCompleted) deferred.complete(null)
             }
         }
         scanner.startScan(callback)
-        val device = deferred.await()
-        scanner.stopScan(callback)
+        val device = try {
+            deferred.await()
+        } finally {
+            scanner.stopScan(callback)
+        }
         return device
     }
 
