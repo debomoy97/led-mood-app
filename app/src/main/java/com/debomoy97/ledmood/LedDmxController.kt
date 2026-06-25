@@ -27,6 +27,7 @@ class LedDmxController(private val context: Context) {
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var connectedDeferred: CompletableDeferred<Boolean>? = null
     private var servicesDiscoveredDeferred: CompletableDeferred<Boolean>? = null
+    private var pendingWriteDeferred: CompletableDeferred<Boolean>? = null
 
     private fun clamp(value: Int, lo: Int, hi: Int): Int = value.coerceIn(lo, hi)
 
@@ -38,6 +39,7 @@ class LedDmxController(private val context: Context) {
             } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
                 connectedDeferred?.complete(false)
                 servicesDiscoveredDeferred?.complete(false)
+                pendingWriteDeferred?.complete(false)
             }
         }
 
@@ -49,6 +51,14 @@ class LedDmxController(private val context: Context) {
             } else {
                 servicesDiscoveredDeferred?.complete(false)
             }
+        }
+
+        override fun onCharacteristicWrite(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            pendingWriteDeferred?.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
     }
 
@@ -126,17 +136,40 @@ class LedDmxController(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun write(payload: ByteArray): Boolean {
+    private suspend fun write(payload: ByteArray, ackTimeoutMs: Long = 2000): Boolean {
         val characteristic = writeCharacteristic ?: return false
         val g = gatt ?: return false
+
+        pendingWriteDeferred = CompletableDeferred()
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         characteristic.value = payload
-        return g.writeCharacteristic(characteristic)
+
+        val queued = g.writeCharacteristic(characteristic)
+        if (!queued) {
+            pendingWriteDeferred = null
+            return false
+        }
+
+        // Wait for onCharacteristicWrite to confirm this specific write completed
+        // before letting the caller queue the next one. Without this, Android's
+        // BLE stack can silently drop subsequent writes fired before the previous
+        // one is acknowledged. Some cheap peripherals are also slow/inconsistent
+        // about firing this callback even with WRITE_TYPE_NO_RESPONSE, so we fall
+        // back to "assume success" after a timeout rather than blocking forever.
+        val acked = withTimeoutOrNull(ackTimeoutMs) { pendingWriteDeferred?.await() }
+        pendingWriteDeferred = null
+
+        // Small settle delay: several of these controllers need a brief gap
+        // between commands even after acknowledging, or the next write gets
+        // ignored at the firmware level.
+        delay(60)
+
+        return acked ?: true
     }
 
     // ---------- commands (byte layouts from user154lt/LEDDMX-00) ----------
 
-    fun setPower(on: Boolean): Boolean {
+    suspend fun setPower(on: Boolean): Boolean {
         val payload = byteArrayOf(
             0x7B.toByte(), 0xFF.toByte(), 0x04.toByte(),
             if (on) 0x03.toByte() else 0x02.toByte(),
@@ -145,7 +178,7 @@ class LedDmxController(private val context: Context) {
         return write(payload)
     }
 
-    fun setColor(r: Int, g: Int, b: Int): Boolean {
+    suspend fun setColor(r: Int, g: Int, b: Int): Boolean {
         val red = clamp(r, 0, 255).toByte()
         val green = clamp(g, 0, 255).toByte()
         val blue = clamp(b, 0, 255).toByte()
@@ -157,7 +190,7 @@ class LedDmxController(private val context: Context) {
         return write(payload)
     }
 
-    fun setBrightness(percent: Int): Boolean {
+    suspend fun setBrightness(percent: Int): Boolean {
         val pct = clamp(percent, 0, 100)
         val adjusted = (pct * 32) / 100
         val payload = byteArrayOf(
@@ -168,7 +201,7 @@ class LedDmxController(private val context: Context) {
         return write(payload)
     }
 
-    fun setPattern(patternIndex: Int): Boolean {
+    suspend fun setPattern(patternIndex: Int): Boolean {
         val idx = clamp(patternIndex, 0, 210)
         val payload = byteArrayOf(
             0x7B.toByte(), 0xFF.toByte(), 0x03.toByte(),
@@ -178,7 +211,7 @@ class LedDmxController(private val context: Context) {
         return write(payload)
     }
 
-    fun setMicEq(eqMode: Int): Boolean {
+    suspend fun setMicEq(eqMode: Int): Boolean {
         val mode = clamp(eqMode, 0, 255)
         val payload = byteArrayOf(
             0x7B.toByte(), 0xFF.toByte(), 0x0B.toByte(),
