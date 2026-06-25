@@ -89,6 +89,12 @@ class LedDmxController(private val context: Context) {
      * BLE stacks (even Android's, though far less than Windows') can be flaky on the
      * first attempt.
      */
+    private sealed class ScanOutcome {
+        data class Found(val device: BluetoothDevice) : ScanOutcome()
+        object NotFound : ScanOutcome()
+        data class Failed(val errorCode: Int) : ScanOutcome()
+    }
+
     @SuppressLint("MissingPermission")
     suspend fun connect(
         nameFragment: String,
@@ -114,13 +120,34 @@ class LedDmxController(private val context: Context) {
 
         repeat(retries) { attempt ->
             Log.d(TAG, "Connect attempt ${attempt + 1}/$retries: scanning for '$nameFragment'...")
-            val device = withTimeoutOrNull(scanTimeoutMs) {
+            val outcome = withTimeoutOrNull(scanTimeoutMs) {
                 scanForDevice(scanner, nameFragment)
+            } ?: ScanOutcome.NotFound
+
+            val device = when (outcome) {
+                is ScanOutcome.Found -> outcome.device
+                is ScanOutcome.Failed -> {
+                    // errorCode 2 (APPLICATION_REGISTRATION_FAILED) is commonly
+                    // Android's anti-spam scan throttle (more than ~5 scan starts
+                    // in a 30s window). Retrying immediately just fails again, so
+                    // back off long enough to clear the throttle window instead.
+                    if (outcome.errorCode == 2) {
+                        Log.w(TAG, "Scan throttled by Android (errorCode=2). Backing off 6s before retrying...")
+                        delay(6000)
+                    } else {
+                        Log.w(TAG, "Scan failed (errorCode=${outcome.errorCode}). Backing off 1.5s...")
+                        delay(1500)
+                    }
+                    null
+                }
+                ScanOutcome.NotFound -> {
+                    Log.w(TAG, "Attempt ${attempt + 1}/$retries: device not found within ${scanTimeoutMs}ms")
+                    delay(1000)
+                    null
+                }
             }
 
             if (device == null) {
-                Log.w(TAG, "Attempt ${attempt + 1}/$retries: device not found within ${scanTimeoutMs}ms")
-                delay(1000)
                 return@repeat
             }
 
@@ -132,6 +159,7 @@ class LedDmxController(private val context: Context) {
             val discovered = withTimeoutOrNull(connectTimeoutMs) {
                 servicesDiscoveredDeferred?.await()
             } ?: false
+
 
             if (discovered) {
                 Log.d(TAG, "Attempt ${attempt + 1}/$retries: connected and ready.")
@@ -150,8 +178,8 @@ class LedDmxController(private val context: Context) {
     private suspend fun scanForDevice(
         scanner: android.bluetooth.le.BluetoothLeScanner,
         nameFragment: String,
-    ): BluetoothDevice? {
-        val deferred = CompletableDeferred<BluetoothDevice?>()
+    ): ScanOutcome {
+        val deferred = CompletableDeferred<ScanOutcome>()
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 try {
@@ -160,7 +188,7 @@ class LedDmxController(private val context: Context) {
                         Log.v(TAG, "Scan saw device: $name (${result.device.address})")
                     }
                     if (name != null && name.contains(nameFragment, ignoreCase = true)) {
-                        if (!deferred.isCompleted) deferred.complete(result.device)
+                        if (!deferred.isCompleted) deferred.complete(ScanOutcome.Found(result.device))
                     }
                 } catch (e: SecurityException) {
                     Log.e(TAG, "Missing permission while reading scan result", e)
@@ -168,17 +196,34 @@ class LedDmxController(private val context: Context) {
             }
 
             override fun onScanFailed(errorCode: Int) {
-                Log.e(TAG, "BLE scan failed with errorCode=$errorCode")
-                if (!deferred.isCompleted) deferred.complete(null)
+                val reason = when (errorCode) {
+                    1 -> "SCAN_FAILED_ALREADY_STARTED"
+                    2 -> "SCAN_FAILED_APPLICATION_REGISTRATION_FAILED (likely Android's scan throttle - too many scan starts recently)"
+                    3 -> "SCAN_FAILED_INTERNAL_ERROR"
+                    4 -> "SCAN_FAILED_FEATURE_UNSUPPORTED"
+                    5 -> "SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES"
+                    6 -> "SCAN_FAILED_SCANNING_TOO_FREQUENTLY"
+                    else -> "unknown"
+                }
+                Log.e(TAG, "BLE scan failed with errorCode=$errorCode ($reason)")
+                if (!deferred.isCompleted) deferred.complete(ScanOutcome.Failed(errorCode))
             }
         }
+
+        // Try to clear any stale scan session before starting a fresh one.
+        try {
+            scanner.stopScan(callback)
+        } catch (e: Exception) {
+            Log.v(TAG, "Pre-emptive stopScan threw (expected if nothing was running): $e")
+        }
+
         scanner.startScan(callback)
-        val device = try {
+        val outcome = try {
             deferred.await()
         } finally {
             scanner.stopScan(callback)
         }
-        return device
+        return outcome
     }
 
     @SuppressLint("MissingPermission")
