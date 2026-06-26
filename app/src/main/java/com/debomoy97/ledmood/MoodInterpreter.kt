@@ -1,5 +1,6 @@
 package com.debomoy97.ledmood
 
+import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -17,6 +18,9 @@ data class LedCommand(
     val brightness: Int? = null,
     val pattern: Int? = null,
     val micEq: Int? = null,
+    val customColors: List<Triple<Int, Int, Int>>? = null,
+    val customMode: CustomPatternMode? = null,
+    val customForward: Boolean? = null,
 )
 
 /**
@@ -36,16 +40,37 @@ object MoodInterpreter {
             these optional fields:
 
             - "power": true or false
-            - "color": [r, g, b] each 0-255 (the dominant/base color for this mood)
+            - "color": [r, g, b] each 0-255 (the dominant/base color for this mood,
+              used when not building a custom_colors sequence)
             - "brightness": integer 0-100
             - "pattern": integer index into this pattern list (0 = off/static
               color): $patternListJson
             - "mic_eq": integer 0-255, ONLY set this if the user explicitly wants
               the strip to react live to music/audio via its built-in microphone
-              (0 disables it). Don't combine mic_eq with pattern.
+              (0 disables it). Don't combine mic_eq with pattern or custom_colors.
+
+            Instead of "pattern", you may design an ORIGINAL color sequence
+            tailored to the mood, rather than picking from the preset list:
+            - "custom_colors": a list of 2-6 [r, g, b] colors that together
+              capture the requested mood/scene as a sequence (e.g. a sunset
+              mood might be a list moving from deep orange to purple to navy)
+            - "custom_mode": one of "GD" (gradual blend), "FD" (fade),
+              "FW" (flowing wipe), "FS" (flash/strobe - high energy only),
+              "PU" (pulse/jump - rhythmic), "FL" (flicker), "HO" (hold/static,
+              effectively just cycles through the list without animating)
+            - "custom_forward": true or false, direction of the sequence
+
+            Prefer designing a custom_colors sequence over picking a generic
+            preset "pattern" whenever the mood has a clear color story (e.g.
+            sunset, ocean, forest, fire, a specific song's mood) - this gives a
+            much more tailored result than the fixed preset list. Use "pattern"
+            for generic requests (e.g. "just cycle colors", "rainbow") where a
+            preset is just as good. Don't set both "pattern" and
+            "custom_colors" in the same response.
 
             Pick values that genuinely fit the requested mood/scene. Always
-            include at least "color" and "brightness". Output raw JSON only.
+            include at least "color" and "brightness", even when also setting
+            custom_colors (color acts as a fallback/base). Output raw JSON only.
         """.trimIndent()
     }
 
@@ -98,12 +123,32 @@ object MoodInterpreter {
                             Triple(arr.getInt(0), arr.getInt(1), arr.getInt(2))
                         } else null
 
+                        val customColors = if (data.has("custom_colors")) {
+                            val arr = data.getJSONArray("custom_colors")
+                            (0 until arr.length()).map { i ->
+                                val c = arr.getJSONArray(i)
+                                Triple(c.getInt(0), c.getInt(1), c.getInt(2))
+                            }
+                        } else null
+
+                        val customMode = if (data.has("custom_mode")) {
+                            try {
+                                CustomPatternMode.valueOf(data.getString("custom_mode").uppercase())
+                            } catch (e: IllegalArgumentException) {
+                                Log.w("MoodInterpreter", "Unknown custom_mode value, ignoring: ${data.getString("custom_mode")}")
+                                null
+                            }
+                        } else null
+
                         val command = LedCommand(
                             power = if (data.has("power")) data.getBoolean("power") else null,
                             color = color,
                             brightness = if (data.has("brightness")) data.getInt("brightness") else null,
                             pattern = if (data.has("pattern")) data.getInt("pattern") else null,
                             micEq = if (data.has("mic_eq")) data.getInt("mic_eq") else null,
+                            customColors = customColors,
+                            customMode = customMode,
+                            customForward = if (data.has("custom_forward")) data.getBoolean("custom_forward") else null,
                         )
                         continuation.resume(command)
                     } catch (e: Exception) {

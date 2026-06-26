@@ -319,4 +319,84 @@ class LedDmxController(private val context: Context) {
         )
         return write(payload)
     }
+
+    // ---------- custom pattern commands ----------
+    // To build a custom pattern: send each color via setCustomPatternColor
+    // (1-indexed position, with the total list size on every call), then
+    // call setCustomPatternMode to pick the transition style, then optionally
+    // setCustomPatternDirection. AC mode means "off", not a real animation.
+
+    suspend fun setCustomPatternColor(r: Int, g: Int, b: Int, listPosition: Int, listSize: Int): Boolean {
+        val red = clamp(r, 0, 255).toByte()
+        val green = clamp(g, 0, 255).toByte()
+        val blue = clamp(b, 0, 255).toByte()
+        val payload = byteArrayOf(
+            0x7B.toByte(), listPosition.toByte(), 0x0E.toByte(), 0xFD.toByte(),
+            red, green, blue,
+            listSize.toByte(), 0xBF.toByte(),
+        )
+        return write(payload)
+    }
+
+    suspend fun setCustomPatternMode(mode: CustomPatternMode): Boolean {
+        val payload = byteArrayOf(
+            0x7B.toByte(), 0xFF.toByte(), 0x13.toByte(),
+            mode.ordinal.toByte(),
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xBF.toByte(),
+        )
+        return write(payload)
+    }
+
+    suspend fun setCustomPatternDirection(isForward: Boolean): Boolean {
+        val payload = byteArrayOf(
+            0x7B.toByte(), 0xFF.toByte(), 0x0D.toByte(),
+            if (isForward) 0x00.toByte() else 0x01.toByte(),
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xBF.toByte(),
+        )
+        return write(payload)
+    }
+
+    /**
+     * Convenience: sends a full custom color list followed by a mode (and
+     * optional direction) in one call, with proper write-ack sequencing
+     * between every step.
+     */
+    suspend fun applyCustomPattern(
+        colors: List<Triple<Int, Int, Int>>,
+        mode: CustomPatternMode,
+        forward: Boolean = true,
+    ): Boolean {
+        if (colors.isEmpty()) return false
+        colors.forEachIndexed { index, (r, g, b) ->
+            val ok = setCustomPatternColor(r, g, b, listPosition = index + 1, listSize = colors.size)
+            if (!ok) return false
+        }
+        if (!setCustomPatternMode(mode)) return false
+        return setCustomPatternDirection(forward)
+    }
+
+    // ---------- EXPERIMENTAL: speed ----------
+    // No speed/timing byte is documented anywhere in the reverse-engineered
+    // protocol (user154lt/LEDDMX-00) for either preset or custom patterns.
+    // This function is an UNVERIFIED GUESS for experimentation only: it
+    // reuses the pattern command's normally-0xFF filler bytes, on the theory
+    // that one of them might be a speed value the original repo author never
+    // tested. There is a real chance this does nothing, or does something
+    // unexpected. Treat any result as a genuine discovery, not a confirmed
+    // feature, and report back exactly what you observe for each byte slot
+    // tried so we can narrow it down further.
+    suspend fun experimentalSetPatternSpeed(patternIndex: Int, speedGuess: Int, byteSlot: Int = 4): Boolean {
+        val idx = clamp(patternIndex, 0, 210)
+        val speed = clamp(speedGuess, 0, 255).toByte()
+        val payload = byteArrayOf(
+            0x7B.toByte(), 0xFF.toByte(), 0x03.toByte(), idx.toByte(),
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xBF.toByte(),
+        )
+        // Overwrite one of the filler 0xFF bytes (index 4..7) with our guess.
+        if (byteSlot in 4..7) {
+            payload[byteSlot] = speed
+        }
+        Log.d(TAG, "EXPERIMENTAL speed write: ${payload.joinToString(" ") { "%02X".format(it) }}")
+        return write(payload)
+    }
 }
