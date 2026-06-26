@@ -26,16 +26,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
 
+    private lateinit var speedTestPatternInput: EditText
+    private lateinit var speedTestByteSlotInput: EditText
+    private lateinit var speedTestValueInput: EditText
+    private lateinit var speedTestButton: Button
+
     private lateinit var ledController: LedDmxController
+
+    // Tracks which action to (re)run once permissions are granted, since both
+    // the main mood flow and the speed test need the same Bluetooth permissions.
+    private var pendingAction: (() -> Unit)? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         if (results.values.all { it }) {
-            runSetMood()
+            pendingAction?.invoke()
         } else {
             setStatus("Bluetooth permission is required to control the strip.")
         }
+        pendingAction = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,6 +59,11 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         progressBar = findViewById(R.id.progressBar)
 
+        speedTestPatternInput = findViewById(R.id.speedTestPatternInput)
+        speedTestByteSlotInput = findViewById(R.id.speedTestByteSlotInput)
+        speedTestValueInput = findViewById(R.id.speedTestValueInput)
+        speedTestButton = findViewById(R.id.speedTestButton)
+
         ledController = LedDmxController(applicationContext)
 
         // Prefill with the device name we already confirmed via nRF Connect,
@@ -59,6 +74,16 @@ class MainActivity : AppCompatActivity() {
             if (hasRequiredPermissions()) {
                 runSetMood()
             } else {
+                pendingAction = { runSetMood() }
+                requestRequiredPermissions()
+            }
+        }
+
+        speedTestButton.setOnClickListener {
+            if (hasRequiredPermissions()) {
+                runSpeedTest()
+            } else {
+                pendingAction = { runSpeedTest() }
                 requestRequiredPermissions()
             }
         }
@@ -97,6 +122,7 @@ class MainActivity : AppCompatActivity() {
     private fun setBusy(busy: Boolean) {
         progressBar.visibility = if (busy) android.view.View.VISIBLE else android.view.View.INVISIBLE
         setMoodButton.isEnabled = !busy
+        speedTestButton.isEnabled = !busy
     }
 
     private fun runSetMood() {
@@ -147,7 +173,86 @@ class MainActivity : AppCompatActivity() {
                 command.pattern?.let { ledController.setPattern(it) }
                 command.micEq?.let { ledController.setMicEq(it) }
 
+                if (command.customColors != null && command.customMode != null) {
+                    ledController.applyCustomPattern(
+                        colors = command.customColors,
+                        mode = command.customMode,
+                        forward = command.customForward ?: true,
+                    )
+                }
+
                 setStatus("Done! $command")
+            } catch (e: Exception) {
+                setStatus("Error: ${e.message}")
+            } finally {
+                ledController.disconnect()
+                setBusy(false)
+            }
+        }
+    }
+
+    private fun runSpeedTest() {
+        val deviceName = deviceNameInput.text.toString().trim()
+        val patternStr = speedTestPatternInput.text.toString().trim()
+        val byteSlotStr = speedTestByteSlotInput.text.toString().trim()
+        val speedStr = speedTestValueInput.text.toString().trim()
+
+        if (deviceName.isEmpty()) {
+            setStatus("Enter the strip's Bluetooth name first.")
+            return
+        }
+        val patternIndex = patternStr.toIntOrNull()
+        if (patternIndex == null || patternIndex !in 1..210) {
+            setStatus("Enter a valid pattern index (1-210) to test speed against.")
+            return
+        }
+        val byteSlot = byteSlotStr.toIntOrNull()
+        if (byteSlot == null || byteSlot !in 4..7) {
+            setStatus("Byte slot must be 4, 5, 6, or 7.")
+            return
+        }
+        val speedGuess = speedStr.toIntOrNull()
+        if (speedGuess == null || speedGuess !in 0..255) {
+            setStatus("Speed guess must be 0-255.")
+            return
+        }
+
+        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        val adapter: BluetoothAdapter? = bluetoothManager.adapter
+        if (adapter == null || !adapter.isEnabled) {
+            setStatus("Please turn on Bluetooth first.")
+            return
+        }
+
+        setBusy(true)
+        setStatus("Connecting to $deviceName for speed test...")
+
+        lifecycleScope.launch {
+            try {
+                val connected = ledController.connect(deviceName)
+                if (!connected) {
+                    setStatus("Could not connect to $deviceName.")
+                    setBusy(false)
+                    return@launch
+                }
+
+                setStatus(
+                    "Connected. Sending pattern=$patternIndex with experimental " +
+                        "byte slot $byteSlot = $speedGuess. Watch the strip now and " +
+                        "compare against just setting the pattern normally."
+                )
+
+                ledController.experimentalSetPatternSpeed(
+                    patternIndex = patternIndex,
+                    speedGuess = speedGuess,
+                    byteSlot = byteSlot,
+                )
+
+                setStatus(
+                    "Sent. Pattern=$patternIndex, slot=$byteSlot, value=$speedGuess. " +
+                        "Did the animation speed change compared to normal? Try other " +
+                        "slot/value combinations to compare."
+                )
             } catch (e: Exception) {
                 setStatus("Error: ${e.message}")
             } finally {
