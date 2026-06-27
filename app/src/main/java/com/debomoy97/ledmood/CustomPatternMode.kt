@@ -16,5 +16,5 @@ enum class CustomPatternMode {
     AC, // "Off" - not a real animation
     PU, // Pulse/Jump
     FL, // Flicker
-    HO, // Hold/static
+    HO, // Hold/staticd
 }
