@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
@@ -156,6 +157,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val command = MoodInterpreter.interpret(apiKey, mood)
+                Log.d("MainActivity", "Parsed command from LLM: $command")
                 setStatus("Got it: $command\nConnecting to $deviceName...")
 
                 val connected = ledController.connect(deviceName)
