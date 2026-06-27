@@ -239,12 +239,15 @@ class LedDmxController(private val context: Context) {
         val characteristic = writeCharacteristic ?: return false
         val g = gatt ?: return false
 
+        Log.d(TAG, "Writing payload: ${payload.joinToString(" ") { "%02X".format(it) }}")
+
         pendingWriteDeferred = CompletableDeferred()
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         characteristic.value = payload
 
         val queued = g.writeCharacteristic(characteristic)
         if (!queued) {
+            Log.e(TAG, "writeCharacteristic() returned false - write was not queued")
             pendingWriteDeferred = null
             return false
         }
@@ -257,6 +260,9 @@ class LedDmxController(private val context: Context) {
         // back to "assume success" after a timeout rather than blocking forever.
         val acked = withTimeoutOrNull(ackTimeoutMs) { pendingWriteDeferred?.await() }
         pendingWriteDeferred = null
+        if (acked == null) {
+            Log.w(TAG, "Write ack timed out after ${ackTimeoutMs}ms (continuing anyway)")
+        }
 
         // Small settle delay: several of these controllers need a brief gap
         // between commands even after acknowledging, or the next write gets
